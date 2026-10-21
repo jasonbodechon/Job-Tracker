@@ -1,0 +1,68 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# JavaScript / Vite
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Rust / Cargo / Tauri build output
+target/
+**/target/
+*.rs.bk
+
+# PostgreSQL backups created by deployment/backup.sh
+job-tracker-*.dump
+*.dump
+
+# Local Job-Tracker databases
+job-tracker.sqlite3
+job-tracker.sqlite3-*
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# IDE settings
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Test and diagnostic output
+test-results/
+playwright-report/
+.vitest/
+# Database exports and SQL backups (may contain personal data)
+*.sql.gz
+job-tracker-backup*
+*-backup.sql
+backup*.sql

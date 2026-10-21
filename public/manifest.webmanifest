@@ -1,0 +1,1 @@
+{"name":"Job-Tracker","short_name":"Job-Tracker","description":"Private job discovery, matching, and application tracking.","start_url":"/","display":"standalone","background_color":"#f6f7fb","theme_color":"#5b4fd6","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

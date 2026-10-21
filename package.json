@@ -1,0 +1,27 @@
+{
+  "name": "job-tracker",
+  "private": true,
+  "version": "0.20.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:frontend": "tsc -b && vitest run"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "mammoth": "^1.12.1",
+    "pdfjs-dist": "^6.2.108",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.1",
+    "vitest": "^4.1.11"
+  }
+}

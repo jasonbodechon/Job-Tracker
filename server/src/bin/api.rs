@@ -1,0 +1,2 @@
+use job_tracker_web::{api, config::Config, AppState};
+#[tokio::main] async fn main(){tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();let config=Config::from_env().expect("valid server configuration");let bind=config.bind;let state=AppState::connect(config).await.expect("database connection and migrations");let listener=tokio::net::TcpListener::bind(bind).await.expect("bind API");tracing::info!(%bind,"Job Tracker web API ready");axum::serve(listener,api::router(state)).await.expect("API server");}

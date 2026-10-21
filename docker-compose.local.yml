@@ -1,0 +1,19 @@
+# Local-only override. It deliberately serves plain HTTP on localhost:8080.
+# Do not use this file for a LAN or public deployment.
+services:
+  api:
+    env_file: !override
+      - .env.local
+    environment:
+      APP_ORIGIN: http://localhost:8080
+      COOKIE_SECURE: "false"
+  caddy:
+    ports: !override
+      - "8080:80"
+    volumes:
+      - ./deployment/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+  worker:
+    env_file: !override
+      - .env.local

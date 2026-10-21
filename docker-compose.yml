@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: job_tracker
+      POSTGRES_USER: job_tracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: ["job_tracker_postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U job_tracker -d job_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: ${JOB_TRACKER_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql://job_tracker:${POSTGRES_PASSWORD}@postgres/job_tracker
+      STATIC_DIR: /app/dist
+    depends_on:
+      postgres: { condition: service_healthy }
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+  worker:
+    build: .
+    command: ["job-tracker-worker"]
+    restart: unless-stopped
+    env_file: ${JOB_TRACKER_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql://job_tracker:${POSTGRES_PASSWORD}@postgres/job_tracker
+    depends_on:
+      postgres: { condition: service_healthy }
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment: { JOB_TRACKER_DOMAIN: "${JOB_TRACKER_DOMAIN:?Set JOB_TRACKER_DOMAIN in .env}" }
+    ports: ["80:80", "443:443"]
+    volumes: ["./deployment/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data", "caddy_config:/config"]
+    depends_on:
+      api: { condition: service_healthy }
+volumes:
+  job_tracker_postgres:
+  caddy_data:
+  caddy_config:
