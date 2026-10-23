@@ -135,3 +135,13 @@
 .source-summaries li.empty::before { content: "○ "; color: #a57526; }
 .source-summaries li.failed { color: #b54a3a; }
 .source-summaries li.failed::before { content: "! "; color: #b54a3a; }
+
+/* Paging controls under the job results table. */
+.pagination { display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-top: 1px solid #efedf1; color: #777682; font-size: 12px; }
+.pagination > span { margin-right: auto; }
+.pagination label { display: flex; align-items: center; gap: 8px; }
+.pagination select { padding: 5px 7px; }
+.page-buttons { display: flex; align-items: center; gap: 8px; }
+.page-buttons button { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #dedde5; border-radius: 7px; background: #fff; color: #555461; }
+.page-buttons button:hover:not(:disabled) { background: #f5f3fc; }
+.page-buttons button:disabled { opacity: .45; cursor: default; }
