@@ -1,0 +1,2 @@
+# CMD needs Windows line endings to find its subroutine labels reliably.
+*.cmd text eol=crlf

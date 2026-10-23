@@ -1,0 +1,13 @@
+# Keep personal data, secrets and local build output out of the Docker build context.
+.git
+.env
+.env.*
+backups/
+*.dump
+*.sqlite3
+*.sqlite3-*
+node_modules/
+dist/
+target/
+**/target/
+src-tauri/

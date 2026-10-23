@@ -16,7 +16,8 @@ target/
 **/target/
 *.rs.bk
 
-# PostgreSQL backups created by deployment/backup.sh
+# PostgreSQL backups created by deployment/backup.sh and Start Job Tracker Local.cmd
+backups/
 job-tracker-*.dump
 *.dump
 
