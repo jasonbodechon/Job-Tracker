@@ -14,7 +14,11 @@ pub mod notifications;
 pub mod service;
 
 use sqlx::PgPool;
-use std::net::IpAddr;
+use std::{net::IpAddr, time::Duration};
+
+/// Limits for every outbound request, so one unresponsive site cannot hang a search forever.
+pub const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -34,7 +38,7 @@ impl AppState {
             let host = attempt.url().host_str().unwrap_or_default().to_ascii_lowercase();
             if host == "localhost" || host.ends_with(".local") || host.parse::<IpAddr>().is_ok() { attempt.stop() } else { attempt.follow() }
         });
-        let client = reqwest::Client::builder().redirect(redirect).user_agent(format!("JobTracker/{}", env!("CARGO_PKG_VERSION"))).build().expect("HTTP client");
+        let client = reqwest::Client::builder().redirect(redirect).connect_timeout(HTTP_CONNECT_TIMEOUT).timeout(HTTP_REQUEST_TIMEOUT).user_agent(format!("JobTracker/{}", env!("CARGO_PKG_VERSION"))).build().expect("HTTP client");
         Ok(Self { db, config, client })
     }
 }

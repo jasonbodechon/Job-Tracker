@@ -66,7 +66,7 @@ pub struct Job { pub id: String, pub source: String, pub external_id: String, pu
 pub struct Tracker { pub job_id: String, pub status: String, pub notes: String, pub contact_name: String, pub contact_email: String, pub application_date: Option<String>, pub interview_date: Option<String>, pub follow_up_at: Option<String> }
 
 #[derive(Debug, Serialize, FromRow)] #[serde(rename_all = "camelCase")]
-pub struct SearchRun { pub id: String, pub started_at: String, pub finished_at: Option<String>, pub trigger_type: String, pub sources_checked: i32, pub jobs_imported: i32, pub errors: Value }
+pub struct SearchRun { pub id: String, pub started_at: String, pub finished_at: Option<String>, pub trigger_type: String, pub sources_checked: i32, pub jobs_imported: i32, pub errors: Value, pub status: String, pub progress: String, pub result: Option<Value> }
 
 #[derive(Debug, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct ImportResult {

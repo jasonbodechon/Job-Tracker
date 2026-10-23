@@ -2,15 +2,16 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { BarChart3, Bell, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, CirclePlus, FileText, LoaderCircle, Search } from "lucide-react";
 import AdminSettings from "./AdminSettings";
 import { defaultProfile, demoJobs } from "./lib/mockJobs";
-import { addCompanyDirectorySource, enablePushNotifications, exportArchive, exportJobsCsv, importDesktopDatabase, importWebArchive, loadCompanyDirectory, loadDiagnostics, loadProfiles, loadSearchRuns, loadSiteSchedule, loadSources, loadStoredJobs, loadTracker, persistProfile, persistSource, persistTracker, persistTrackerStatus, refreshSavedSource, removeCompanyDirectorySources, removeProfile, removeSource, runRetention, runServerSearch, setCompanyDirectoryEnabled, verifyCompanyDirectoryEntry, type SessionUser } from "./lib/native";
+import { addCompanyDirectorySource, enablePushNotifications, exportArchive, exportJobsCsv, importDesktopDatabase, importWebArchive, loadCompanyDirectory, loadDiagnostics, loadProfiles, loadSearchRun, loadSearchRuns, loadSiteSchedule, loadSources, loadStoredJobs, loadTracker, persistProfile, persistSource, persistTracker, persistTrackerStatus, refreshSavedSource, removeCompanyDirectorySources, removeProfile, removeSource, runRetention, runServerSearch, setCompanyDirectoryEnabled, verifyCompanyDirectoryEntry, type SessionUser } from "./lib/native";
 import { filterCompanyDirectory, findDirectorySource } from "./lib/companyDirectory";
 import { parseProfileList, profileListDrafts, type ProfileListDrafts } from "./lib/profileInputs";
 import { parseResumeFile } from "./lib/resumeParser";
 import { filterAndSortJobs, formatDistance, formatScoreValue, getJobProfileMatches, type SortColumn, type SortDirection } from "./lib/jobResults";
 import { describeSearchResult, noResultsGuidance } from "./lib/searchSummary";
+import { runningSearch, searchRunResult, waitForSearchRun } from "./lib/searchRuns";
 import { connectorDefaults, effectiveSourceTuning } from "./lib/sourceSettings";
 import { APP_NAME, APP_VERSION_LABEL } from "./lib/version";
-import { defaultMatchingWeights, type CompanyDirectoryEntry, type Diagnostics, type Job, type JobSourceConfig, type JobSourceKind, type JobStatus, type SearchProfile, type SearchRun, type TrackerDetails } from "./types/job";
+import { defaultMatchingWeights, type CompanyDirectoryEntry, type Diagnostics, type Job, type JobSourceConfig, type JobSourceKind, type JobStatus, type SearchProfile, type ImportResult, type SearchRun, type TrackerDetails } from "./types/job";
 
 const statusOptions: JobStatus[] = ["New", "Saved", "Applied", "Interviewing", "Offer", "Rejected", "Archived"];
 const sourceOptions: JobSourceKind[] = ["Greenhouse", "Lever", "Ashby", "SmartRecruiters", "Amazon", "Workday", "Microsoft", "Google", "CareerPage", "Adzuna", "USAJOBS"];
@@ -23,6 +24,7 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
   const [active, setActive] = useState("Job matches");
   const [query, setQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [searchProgress, setSearchProgress] = useState("");
   const [sourceFilters, setSourceFilters] = useState<JobSourceKind[]>([]);
   const [statusFilters, setStatusFilters] = useState<JobStatus[]>([]);
   const [profileFilters, setProfileFilters] = useState<string[]>([]);
@@ -75,9 +77,14 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
     if (health) setDiagnostics(health);
     if (directory) setCompanyDirectory(directory);
     if (schedule) setSiteSchedule(schedule.schedule);
+    return runs;
   }
 
-  useEffect(() => { reloadData().catch((error) => console.error("Unable to load local Job Tracker data", error)); }, []);
+  useEffect(() => {
+    reloadData()
+      .then((runs) => { const running = runningSearch(runs); if (running) void followSearch(() => Promise.resolve(running.id)); })
+      .catch((error) => console.error("Unable to load local Job Tracker data", error));
+  }, []);
   useEffect(() => { if (!message) return; const timeout = window.setTimeout(() => setMessage(""), MESSAGE_TIMEOUT_MS); return () => window.clearTimeout(timeout); }, [message]);
 
   const profileFilterOptions = useMemo(() => [...new Set(jobs.flatMap((job) => getJobProfileMatches(job).map((match) => match.profileName)))].sort((left, right) => left.localeCompare(right)), [jobs]);
@@ -87,9 +94,33 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
   const visibleDirectory = useMemo(() => filterCompanyDirectory(companyDirectory, directoryQuery, directoryCountries, directoryProviders), [companyDirectory, directoryQuery, directoryCountries, directoryProviders]);
   const stats = { strong: jobs.filter((job) => job.matchScore >= 75).length, new: jobs.filter((job) => job.isNew).length, applied: jobs.filter((job) => job.status === "Applied").length, followUps: diagnostics?.dueFollowUps ?? 0 };
 
-  async function refreshSource(source: JobSourceConfig, triggerType = "manual") {
+  // Searches run in the background on the server. The page starts one, then follows its
+  // progress until it finishes, so a slow first import no longer depends on one long request.
+  async function runTrackedSearch(start: () => Promise<string>): Promise<ImportResult> {
+    setIsSearching(true); setSearchProgress("Starting search…");
     try {
-      const result = await refreshSavedSource(source.id); await reloadData(); return result;
+      const runId = await start();
+      const run = await waitForSearchRun(loadSearchRun, runId, { onProgress: (current) => setSearchProgress(current.progress) });
+      await reloadData();
+      return searchRunResult(run);
+    } finally { setIsSearching(false); setSearchProgress(""); }
+  }
+
+  async function followSearch(start: () => Promise<string>) {
+    setMessage("");
+    try {
+      const result = await runTrackedSearch(start);
+      const summary = describeSearchResult(result);
+      setMessage(result.imported === 0 ? `No jobs met the current profile criteria. ${summary}${noResultsGuidance(result)}` : `Refresh complete: ${summary}`);
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : "Search failed.";
+      setMessage(failure);
+    }
+  }
+
+  async function refreshSource(source: JobSourceConfig) {
+    try {
+      return await runTrackedSearch(async () => (await refreshSavedSource(source.id)).runId);
     } catch (error) {
       const lastError = error instanceof Error ? error.message : "Refresh failed.";
       setSources((current) => current.map((item) => item.id === source.id ? { ...item, lastError } : item));
@@ -97,16 +128,8 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
     }
   }
 
-  async function searchNow(triggerType = "manual") {
-    setIsSearching(true); setMessage("");
-    try {
-      const result = await runServerSearch(triggerType); await reloadData();
-      const summary = describeSearchResult(result);
-      setMessage(result.imported === 0 ? `No jobs met the current profile criteria. ${summary}${noResultsGuidance(result)}` : `Refresh complete: ${summary}`);
-    } catch (error) {
-      const failure = error instanceof Error ? error.message : "Search failed.";
-      setMessage(failure);
-    } finally { setIsSearching(false); }
+  function searchNow(triggerType = "manual") {
+    return followSearch(async () => (await runServerSearch(triggerType)).runId);
   }
 
   async function saveProfile() {
@@ -171,6 +194,7 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
     <aside className="sidebar"><div className="brand"><span className="brand-mark"><BriefcaseBusiness size={20}/></span><span>{APP_NAME}<small>{APP_VERSION_LABEL}</small></span></div><nav>{([{ Icon: Search, label: "Job matches" }, { Icon: BriefcaseBusiness, label: "Tracker" }, { Icon: FileText, label: "Profiles" }, { Icon: CalendarClock, label: "Schedules" }, ...(user.role === "admin" ? [{ Icon: Building2, label: "Admin settings" }] : [])]).map(({ Icon, label }) => <button key={label} className={active === label ? "nav-item active" : "nav-item"} onClick={() => setActive(label)}><Icon size={18}/>{label}</button>)}</nav><div className="sidebar-bottom"><button className="nav-item" onClick={() => void onLogout()}>Sign out</button><p>{user.displayName}<br/><span>{user.email} · {user.role}</span></p></div></aside>
     <section className={active === "Admin settings" ? "content admin-mode" : "content"}>
       <header><div><p className="eyebrow">{active.toUpperCase()}</p><h1>{active}</h1></div><div className="header-actions"><span className="version-badge">{APP_VERSION_LABEL}</span>{active !== "Admin settings"&&<><button className="icon-button" aria-label="Notification settings" onClick={() => setActive("Schedules")}><Bell size={19}/>{stats.followUps > 0 && <i/>}</button><button className="primary" onClick={() => searchNow()} disabled={isSearching}>{isSearching ? <LoaderCircle className="spin" size={17}/> : <Search size={17}/>} {isSearching ? "Importing…" : "Search now"}</button></>}</div></header>
+      {isSearching && searchProgress && <p className="search-progress" role="status"><LoaderCircle className="spin" size={15}/> {searchProgress}</p>}
       {message && <p className="notice">{message}</p>}
 
       {active==="Job matches"&&jobs.some((job)=>job.locationStatus)&&<section className="location-results"><h3>Distance and location status</h3><div>{visibleJobs.map((job)=><button key={job.id} onClick={()=>void selectJob(job)}><span><strong>{job.title}</strong><small>{job.company} · {job.location}</small></span><span className={`location-badge ${job.locationStatus?.toLowerCase().replace(/\s+/g,"-")}`}>{job.locationStatus??"Not evaluated"}<small>{formatDistance(job.distanceKm)}</small></span></button>)}</div></section>}
@@ -221,8 +245,8 @@ export default function App({ user, onLogout }: { user: SessionUser; onLogout: (
       {active === "Job matches" && activeProfileCard}
       {active === "Job matches" && <section className="stat-grid"><Stat title="Strong matches" value={stats.strong} note="75% score or higher" accent="violet" icon={<BarChart3 size={20}/>}/><Stat title="New since last search" value={stats.new} note="Across enabled sources" accent="blue" icon={<CirclePlus size={20}/>}/><Stat title="Applications active" value={stats.applied} note="Saved locally" accent="amber" icon={<BriefcaseBusiness size={20}/>}/><Stat title="Follow-ups due" value={stats.followUps} note="Based on tracker dates" accent="green" icon={<CheckCircle2 size={20}/>} /></section>}
       {active === "Job matches" && <section className="results-card"><div className="card-heading"><div><h2>Best job matches</h2><p>{visibleJobs.length} result{visibleJobs.length === 1 ? "" : "s"} · Transparent scores use your enabled profiles and configured weights</p></div></div><div className="filters"><div className="search-box"><Search size={18}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search saved results"/></div><MultiSelect label="Sources" options={sourceOptions} selected={sourceFilters} onChange={setSourceFilters}/><MultiSelect label="Profiles" options={profileFilterOptions} selected={profileFilters} onChange={setProfileFilters}/><MultiSelect label="Tracker status" options={statusOptions} selected={statusFilters} onChange={setStatusFilters}/><label className="date-filter">Posted from<input type="date" value={postedFrom} max={postedTo || undefined} onChange={(e) => setPostedFrom(e.target.value)}/></label><label className="date-filter">Posted to<input type="date" value={postedTo} min={postedFrom || undefined} onChange={(e) => setPostedTo(e.target.value)}/></label>{(sourceFilters.length > 0 || profileFilters.length > 0 || statusFilters.length > 0 || postedFrom || postedTo) && <button className="clear-filters" onClick={() => { setSourceFilters([]); setProfileFilters([]); setStatusFilters([]); setPostedFrom(""); setPostedTo(""); }}>Clear filters</button>}</div><div className="table-wrap"><table><thead><tr><SortableHeader label="ROLE" column="role" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><SortableHeader label="MATCH" column="match" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><SortableHeader label="PROFILES" column="profiles" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><SortableHeader label="SOURCE" column="source" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><SortableHeader label="POSTED" column="posted" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><SortableHeader label="TRACKER STATUS" column="status" activeColumn={sortColumn} direction={sortDirection} onSort={changeSort}/><th aria-label="Actions"/></tr></thead><tbody>{visibleJobs.map((job) => <tr key={job.id} onClick={() => selectJob(job)}><td><strong>{job.title}</strong><span>{job.company} · {job.location}</span></td><td><span className={`score ${job.matchScore >= 85 ? "excellent" : job.matchScore >= 70 ? "good" : "fair"}`}>{job.matchScore}%</span></td><td><div className="profile-chips">{getJobProfileMatches(job).map((match) => <span key={match.profileId} title={`${formatScoreValue(match.matchScore)}% · ${match.matchReason}`}>{match.profileName}</span>)}</div></td><td><span className="source">{job.source}</span></td><td>{job.postedAt}</td><td><select className="status-select" value={job.status} onClick={(e) => e.stopPropagation()} onChange={(e) => changeStatus(job.id, e.target.value as JobStatus)}>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></td><td><button className="row-action" onClick={(e) => { e.stopPropagation(); void selectJob(job); }} aria-label={`Open ${job.title}`}><ChevronRight size={18}/></button></td></tr>)}</tbody></table></div></section>}
-      {active === "Job matches" && <section className="activity"><div><h2>Latest search run</h2><p>{searchRuns[0] ? `${searchRuns[0].startedAt} · ${searchRuns[0].triggerType} · ${searchRuns[0].jobsImported} jobs imported${searchRuns[0].errors.length ? ` · ${searchRuns[0].errors[0]}` : ""}` : "No persisted search runs yet"}</p></div><div className="source-checks">{sources.map((source) => <span key={source.id}><b>{source.lastError ? "!" : "✓"}</b> {source.company}</span>)}</div></section>}
-      {active === "Admin settings" && user.role === "admin" && <AdminSettings directory={companyDirectory} sources={sources} sourceManagement={sourceManagement} onReload={reloadData} onToggleCompany={toggleDirectoryCompany} onAddSource={addDirectorySource} onRemoveSource={removeDirectorySource} onVerify={verifyDirectoryEntry} onImport={importData} onMessage={setMessage} onSiteScheduleChanged={setSiteSchedule}/>}
+      {active === "Job matches" && <section className="activity"><div><h2>Latest search run</h2><p>{searchRuns[0] ? `${searchRuns[0].startedAt} · ${searchRuns[0].triggerType} · ${searchRuns[0].status === "Running" ? `running: ${searchRuns[0].progress}` : searchRuns[0].status === "Completed" ? `${searchRuns[0].jobsImported} jobs imported` : searchRuns[0].status.toLowerCase()}${searchRuns[0].errors.length ? ` · ${searchRuns[0].errors[searchRuns[0].errors.length - 1]}` : ""}` : "No persisted search runs yet"}</p></div><div className="source-checks">{sources.map((source) => <span key={source.id}><b>{source.lastError ? "!" : "✓"}</b> {source.company}</span>)}</div></section>}
+      {active === "Admin settings" && user.role === "admin" && <AdminSettings directory={companyDirectory} sources={sources} sourceManagement={sourceManagement} onReload={async () => { await reloadData(); }} onToggleCompany={toggleDirectoryCompany} onAddSource={addDirectorySource} onRemoveSource={removeDirectorySource} onVerify={verifyDirectoryEntry} onImport={importData} onMessage={setMessage} onSiteScheduleChanged={setSiteSchedule}/>}
       <footer className="app-footer">{APP_NAME} {APP_VERSION_LABEL}</footer>
     </section>
     {selectedJob && tracker && <div className="modal-backdrop" onClick={() => { setSelectedJob(null); setTracker(null); }}><article className="job-modal tracker-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={() => { setSelectedJob(null); setTracker(null); }}>×</button><p className="eyebrow">{selectedJob.source} · Posted {selectedJob.postedAt}</p><h2>{selectedJob.title}</h2><h3>{selectedJob.company} · {selectedJob.location}</h3><div className="job-facts"><span><b>Work style</b>{selectedJob.remoteType}</span><span><b>Source</b>{selectedJob.source}</span><span><b>Tracker status</b>{tracker.status}</span></div><section className="detail-section"><h4>Matching profiles</h4><div className="profile-match-list">{getJobProfileMatches(selectedJob).map((match) => <article key={match.profileId}><span className={`score ${match.matchScore >= 85 ? "excellent" : match.matchScore >= 70 ? "good" : "fair"}`}>{formatScoreValue(match.matchScore)}%</span><div><strong>{match.profileName}</strong><p>{match.matchReason}</p>{match.scoreBreakdown?.length ? <div className="score-breakdown">{match.scoreBreakdown.map((component) => <div key={component.key}><span><b>{component.label}</b><small>{component.details}</small></span><strong>{formatScoreValue(component.earned)} / {formatScoreValue(component.possible)}</strong></div>)}</div> : null}{(match.resumeYears || match.requiredYears) ? <p className="experience-summary">Experience: {match.resumeYears != null ? formatScoreValue(match.resumeYears) : "not detected"} resume years · {match.requiredYears != null ? formatScoreValue(match.requiredYears) : "not specified"} required</p> : null}</div></article>)}</div></section><section className="detail-section"><h4>Matched skills</h4><div className="chips">{selectedJob.skills.length ? selectedJob.skills.map((skill) => <span key={skill}>{skill}</span>) : <span>No configured skills were detected</span>}</div></section><section className="detail-section"><h4>Job description</h4><p className="job-description">{selectedJob.description || "No description was provided by this source."}</p></section><section className="detail-section"><h4>Tracker details</h4><div className="tracker-grid"><label>Status<select value={tracker.status} onChange={(e) => setTracker({ ...tracker, status: e.target.value as JobStatus })}>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label><label>Contact name<input value={tracker.contactName} onChange={(e) => setTracker({ ...tracker, contactName: e.target.value })}/></label><label>Contact email<input type="email" value={tracker.contactEmail} onChange={(e) => setTracker({ ...tracker, contactEmail: e.target.value })}/></label><label>Application date<input type="date" value={tracker.applicationDate ?? ""} onChange={(e) => setTracker({ ...tracker, applicationDate: e.target.value })}/></label><label>Interview date<input type="datetime-local" value={tracker.interviewDate ?? ""} onChange={(e) => setTracker({ ...tracker, interviewDate: e.target.value })}/></label><label>Follow-up date<input type="datetime-local" value={tracker.followUpAt ?? ""} onChange={(e) => setTracker({ ...tracker, followUpAt: e.target.value })}/></label><label className="tracker-notes">Notes<textarea value={tracker.notes} onChange={(e) => setTracker({ ...tracker, notes: e.target.value })}/></label></div></section><div className="modal-actions"><button className="primary" onClick={saveTrackerDetails}>Save tracker details</button><a className="primary link-button" href={selectedJob.applyUrl} target="_blank" rel="noreferrer">Open application <ChevronRight size={16}/></a></div></article></div>}

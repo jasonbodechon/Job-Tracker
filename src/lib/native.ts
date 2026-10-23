@@ -1,4 +1,4 @@
-import type { CompanyDirectoryEntry, Diagnostics, ImportResult, Job, JobSourceConfig, JobStatus, SearchProfile, SearchRun, TrackerDetails } from "../types/job";
+import type { CompanyDirectoryEntry, Diagnostics, Job, JobSourceConfig, JobStatus, SearchProfile, SearchRun, StartedSearch, TrackerDetails } from "../types/job";
 
 const API = import.meta.env.VITE_API_URL ?? "";
 export class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
@@ -35,8 +35,9 @@ export const deleteAdminCompany = (id:string) => request<number>(`/api/admin/com
 export const persistSource = (source: JobSourceConfig, usaJobsEmail = "", usaJobsApiKey = "") => request<void>("/api/sources", body({ ...source, usaJobsEmail: usaJobsEmail || undefined, usaJobsApiKey: usaJobsApiKey || undefined }));
 export const removeSource = (sourceId: string) => request<void>(`/api/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
 export const loadSearchRuns = () => request<SearchRun[]>("/api/search-runs");
-export const refreshSavedSource = (sourceId: string) => request<ImportResult>(`/api/sources/${encodeURIComponent(sourceId)}/refresh`, { method: "POST" });
-export const runServerSearch = (triggerType = "manual") => request<ImportResult>("/api/searches/run", body({ triggerType }));
+export const refreshSavedSource = (sourceId: string) => request<StartedSearch>(`/api/sources/${encodeURIComponent(sourceId)}/refresh`, { method: "POST" });
+export const runServerSearch = (triggerType = "manual") => request<StartedSearch>("/api/searches/run", body({ triggerType }));
+export const loadSearchRun = (runId: string) => request<SearchRun>(`/api/search-runs/${encodeURIComponent(runId)}`);
 export const loadTracker = (jobId: string) => request<TrackerDetails>(`/api/jobs/${encodeURIComponent(jobId)}/tracker`);
 export const persistTracker = (tracker: TrackerDetails) => request<void>(`/api/jobs/${encodeURIComponent(tracker.jobId)}/tracker`, { method: "PUT", body: JSON.stringify(tracker) });
 export const loadDiagnostics = () => request<Diagnostics>("/api/diagnostics");

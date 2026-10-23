@@ -59,7 +59,10 @@ export interface ImportResult {
   sourceErrors?: string[];
   truncatedSources?: string[];
 }
-export interface SearchRun { id: string; startedAt: string; finishedAt?: string; triggerType: string; sourcesChecked: number; jobsImported: number; errors: string[]; }
+export type SearchRunStatus = "Running" | "Completed" | "Failed" | "Abandoned";
+export interface SearchRun { id: string; startedAt: string; finishedAt?: string; triggerType: string; sourcesChecked: number; jobsImported: number; errors: string[]; status: SearchRunStatus; progress: string; result?: ImportResult | null; }
+/** Searches run in the background on the server; starting one returns the run to follow. */
+export interface StartedSearch { runId: string; }
 export interface TrackerDetails { jobId: string; status: JobStatus; notes: string; contactName: string; contactEmail: string; applicationDate?: string; interviewDate?: string; followUpAt?: string; }
 export interface Diagnostics { databasePath: string; databaseSizeBytes: number; activeJobs: number; inactiveJobs: number; profiles: number; enabledSources: number; searchRuns: number; sourceErrors: number; dueFollowUps: number; }
 

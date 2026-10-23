@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use crate::{error::ApiError, models::{Posting, ResolvedLocation}, AppState};
 
+/// Upper limit for one location lookup, so a slow geocoder cannot stall a search.
+const GEOCODING_TIMEOUT_SECONDS: u64 = 15;
+
 #[derive(Debug, Deserialize)]
 struct GeocoderResult {
     display_name: String,
@@ -74,10 +77,19 @@ pub async fn resolve_query(state: &AppState, query: &str) -> Result<Vec<Resolved
         return Ok(serde_json::from_value(cached).unwrap_or_default());
     }
     if state.config.geocoding_delay_ms > 0 { tokio::time::sleep(Duration::from_millis(state.config.geocoding_delay_ms)).await; }
-    let response = state.client.get(format!("{}/search", state.config.geocoding_url)).query(&[("q", query), ("format", "jsonv2"), ("limit", "3"), ("addressdetails", "1")]).send().await;
+    let response = state.client.get(format!("{}/search", state.config.geocoding_url)).query(&[("q", query), ("format", "jsonv2"), ("limit", "3"), ("addressdetails", "1")]).timeout(Duration::from_secs(GEOCODING_TIMEOUT_SECONDS)).send().await;
     let results = match response {
-        Ok(response) if response.status().is_success() => response.json::<Vec<GeocoderResult>>().await.unwrap_or_default().into_iter().filter(|value| !matches!(value.addresstype.as_str(), "country"|"state"|"region") && !matches!(value.result_type.as_str(), "country"|"state"|"region")).filter_map(|value| Some(ResolvedLocation { label:value.display_name,latitude:value.lat.parse().ok()?,longitude:value.lon.parse().ok()?,confidence:if matches!(value.addresstype.as_str(),"house"|"building"|"road"){"address".into()}else{"city".into()} })).collect::<Vec<_>>(),
-        _ => Vec::new(),
+        // Failed lookups are not cached, so a timeout or rate limit is retried on the next search
+        // instead of permanently treating the place as unknown.
+        Ok(response) if response.status().is_success() => {
+            let values = match response.json::<Vec<GeocoderResult>>().await {
+                Ok(values) => values,
+                Err(error) => { tracing::warn!(%error, query, "geocoding response was unreadable; not caching"); return Ok(Vec::new()); }
+            };
+            values.into_iter().filter(|value| !matches!(value.addresstype.as_str(), "country"|"state"|"region") && !matches!(value.result_type.as_str(), "country"|"state"|"region")).filter_map(|value| Some(ResolvedLocation { label:value.display_name,latitude:value.lat.parse().ok()?,longitude:value.lon.parse().ok()?,confidence:if matches!(value.addresstype.as_str(),"house"|"building"|"road"){"address".into()}else{"city".into()} })).collect::<Vec<_>>()
+        }
+        Ok(response) => { tracing::warn!(status = %response.status(), query, "geocoding lookup failed; not caching"); return Ok(Vec::new()); }
+        Err(error) => { tracing::warn!(%error, query, "geocoding lookup failed; not caching"); return Ok(Vec::new()); }
     };
     sqlx::query("INSERT INTO geocoding_cache(normalized_query,query,results,resolved_at) VALUES($1,$2,$3,now()) ON CONFLICT(normalized_query) DO UPDATE SET query=excluded.query,results=excluded.results,resolved_at=excluded.resolved_at").bind(normalized).bind(query).bind(json!(results)).execute(&state.db).await?;
     Ok(results)

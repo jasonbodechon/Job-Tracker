@@ -24,22 +24,114 @@ pub async fn rescore_saved_jobs(state:&AppState,user:Uuid)->Result<usize,ApiErro
 
 fn unique_strings(mut values:Vec<String>)->Vec<String>{values.sort_by_key(|v|v.to_lowercase());values.dedup_by(|a,b|a.eq_ignore_ascii_case(b));values}
 
-pub async fn run_search(state:&AppState,user:Uuid,trigger:&str,only_source:Option<&str>)->Result<ImportResult,ApiError>{
+/// A running search that has not reported progress for this long is treated as stopped.
+const STALE_RUN_MINUTES:i32=30;
+/// Progress is saved after this many processed jobs, which also acts as the run's heartbeat.
+const PROGRESS_EVERY:usize=25;
+const ALREADY_RUNNING:&str="A search is already running. Wait for it to finish before starting another.";
+
+/// Profiles and sources checked before a search starts, so problems are reported immediately.
+struct SearchPlan{profiles:Vec<Profile>,sources:Vec<Source>}
+
+fn now_text()->String{Utc::now().to_rfc3339()}
+
+async fn plan_search(state:&AppState,user:Uuid,only_source:Option<&str>)->Result<SearchPlan,ApiError>{
  let enabled_profiles=profiles(state,user).await?;
  if enabled_profiles.is_empty(){return Err(ApiError::BadRequest("Create at least one profile first.".into()));}
  let mut source_rows=sources(state,user).await?.into_iter().filter(|s|s.enabled).collect::<Vec<_>>();if let Some(id)=only_source{source_rows.retain(|s|s.id==id);}
  if source_rows.is_empty(){return Err(ApiError::BadRequest("Enable at least one source first.".into()));}
- let run_id=Uuid::new_v4().to_string();let started=Utc::now().to_rfc3339();
- sqlx::query("INSERT INTO search_runs(user_id,id,started_at,trigger_type,sources_checked) VALUES($1,$2,$3,$4,$5)").bind(user).bind(&run_id).bind(&started).bind(trigger).bind(source_rows.len() as i32).execute(&state.db).await?;
+ Ok(SearchPlan{profiles:enabled_profiles,sources:source_rows})
+}
+
+/// Marks running searches that stopped reporting progress as abandoned, so they no longer block new searches.
+pub async fn abandon_stale_runs(state:&AppState,user:Option<Uuid>)->Result<u64,ApiError>{
+ let result=sqlx::query("UPDATE search_runs SET status='Abandoned',finished_at=$2,progress='Stopped before finishing',errors=errors||'[\"The search stopped responding before it finished. Run it again.\"]'::jsonb WHERE status='Running' AND ($1::uuid IS NULL OR user_id=$1) AND COALESCE(heartbeat_at,'-infinity'::timestamptz)<now()-make_interval(mins=>$3)")
+  .bind(user).bind(now_text()).bind(STALE_RUN_MINUTES).execute(&state.db).await?;
+ Ok(result.rows_affected())
+}
+
+/// Called when a process starts. Searches that process owned cannot still be running after a restart:
+/// the API owns manual searches and the worker owns scheduled ones.
+pub async fn abandon_interrupted_runs(state:&AppState,scheduled:bool)->Result<u64,ApiError>{
+ let result=sqlx::query("UPDATE search_runs SET status='Abandoned',finished_at=$1,progress='Stopped before finishing',errors=errors||'[\"Job Tracker restarted before this search finished. Run it again.\"]'::jsonb WHERE status='Running' AND (trigger_type='scheduled')=$2")
+  .bind(now_text()).bind(scheduled).execute(&state.db).await?;
+ Ok(result.rows_affected())
+}
+
+/// Records a new running search. The database allows one running search per user, so a second
+/// request is refused instead of starting duplicate work.
+async fn begin_run(state:&AppState,user:Uuid,trigger:&str,sources_checked:usize)->Result<String,ApiError>{
+ abandon_stale_runs(state,Some(user)).await?;
+ let run_id=Uuid::new_v4().to_string();
+ let inserted=sqlx::query("INSERT INTO search_runs(user_id,id,started_at,trigger_type,sources_checked,status,progress,heartbeat_at) VALUES($1,$2,$3,$4,$5,'Running','Starting',now()) ON CONFLICT DO NOTHING")
+  .bind(user).bind(&run_id).bind(now_text()).bind(trigger).bind(sources_checked as i32).execute(&state.db).await?;
+ if inserted.rows_affected()==0{return Err(ApiError::Conflict(ALREADY_RUNNING.into()));}
+ Ok(run_id)
+}
+
+async fn report_progress(state:&AppState,user:Uuid,run_id:&str,progress:&str)->Result<(),ApiError>{
+ sqlx::query("UPDATE search_runs SET progress=$3,heartbeat_at=now() WHERE user_id=$1 AND id=$2 AND status='Running'").bind(user).bind(run_id).bind(progress).execute(&state.db).await?;
+ Ok(())
+}
+
+async fn record_failure(state:&AppState,user:Uuid,run_id:&str,message:&str){
+ if let Err(error)=sqlx::query("UPDATE search_runs SET status='Failed',finished_at=$3,errors=errors||$4,progress='Failed',heartbeat_at=now() WHERE user_id=$1 AND id=$2 AND status='Running'").bind(user).bind(run_id).bind(now_text()).bind(json!([message])).execute(&state.db).await{tracing::error!(?error,%user,run=%run_id,"could not record the failed search");}
+}
+
+/// Starts a search in the background and returns its run id immediately. The search keeps going
+/// if the page reloads or closes; the page follows its progress through the search-runs API.
+pub async fn start_search(state:&AppState,user:Uuid,trigger:&str,only_source:Option<&str>)->Result<String,ApiError>{
+ let plan=plan_search(state,user,only_source).await?;
+ let run_id=begin_run(state,user,trigger,plan.sources.len()).await?;
+ let task_state=state.clone();let task_run=run_id.clone();let task_trigger=trigger.to_string();
+ let search=tokio::spawn(async move{execute_and_record(&task_state,user,&task_run,&task_trigger,plan).await});
+ let watch_state=state.clone();let watch_run=run_id.clone();
+ tokio::spawn(async move{
+  match search.await{
+   Ok(Ok(_))=>{},
+   Ok(Err(error))=>tracing::error!(%user,run=%watch_run,%error,"background search failed"),
+   // A panic would otherwise leave the run marked as running until it went stale.
+   Err(error)=>{tracing::error!(%user,run=%watch_run,%error,"background search stopped unexpectedly");record_failure(&watch_state,user,&watch_run,"The search stopped unexpectedly. Run it again.").await;}
+  }
+ });
+ Ok(run_id)
+}
+
+/// Runs a search to completion in the current task. The scheduled worker uses this.
+pub async fn run_search(state:&AppState,user:Uuid,trigger:&str,only_source:Option<&str>)->Result<ImportResult,ApiError>{
+ let plan=plan_search(state,user,only_source).await?;
+ let run_id=begin_run(state,user,trigger,plan.sources.len()).await?;
+ execute_and_record(state,user,&run_id,trigger,plan).await
+}
+
+async fn execute_and_record(state:&AppState,user:Uuid,run_id:&str,trigger:&str,plan:SearchPlan)->Result<ImportResult,ApiError>{
+ match execute_search(state,user,run_id,plan).await{
+  Ok(result)=>{
+   sqlx::query("UPDATE search_runs SET status='Completed',finished_at=$3,jobs_imported=$4,errors=$5,result=$6,progress='Finished',heartbeat_at=now() WHERE user_id=$1 AND id=$2")
+    .bind(user).bind(run_id).bind(now_text()).bind(result.imported as i32).bind(json!(&result.source_errors)).bind(json!(&result)).execute(&state.db).await?;
+   if trigger=="scheduled"{notifications::create(state,user,"Job Tracker search complete",&format!("{} active jobs imported; {} jobs marked inactive.",result.imported,result.inactive),"/").await?;}
+   Ok(result)
+  }
+  Err(error)=>{record_failure(state,user,run_id,&error.to_string()).await;Err(error)}
+ }
+}
+
+async fn execute_search(state:&AppState,user:Uuid,run_id:&str,plan:SearchPlan)->Result<ImportResult,ApiError>{
+ let SearchPlan{profiles:enabled_profiles,sources:source_rows}=plan;
  let mut imported=0usize;let mut inactive=0usize;let mut fetched=0usize;let mut available=0usize;let mut outside_location=0usize;let mut below_minimum_score=0usize;let mut errors=Vec::new();let mut truncated_sources=Vec::new();
- for source in source_rows {
+ let source_total=source_rows.len();
+ for (source_index,source) in source_rows.into_iter().enumerate() {
+  let source_label=format!("{} (source {} of {})",source.company,source_index+1,source_total);
+  report_progress(state,user,run_id,&format!("{source_label}: fetching jobs")).await?;
   let encrypted:Option<String>=sqlx::query_scalar("SELECT credentials_ciphertext FROM sources WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).fetch_one(&state.db).await?;
   match connectors::fetch_with_metadata(state,&source,encrypted.as_deref()).await {
    Ok(result)=>{
     let postings=result.postings;let reported=result.reported_count.map(|count|count.max(0)as usize).unwrap_or(postings.len());available+=reported;if reported>postings.len(){truncated_sources.push(format!("{} ({} of {})",source.company,postings.len(),reported));}
     fetched+=postings.len();
     let seen=postings.iter().map(|p|format!("{}:{}",source.kind,p.external_id)).collect::<Vec<_>>();
-    for posting in postings {
+    let posting_total=postings.len();
+    for (posting_index,posting) in postings.into_iter().enumerate() {
+     if posting_index%PROGRESS_EVERY==0{report_progress(state,user,run_id,&format!("{source_label}: checking job {} of {}",posting_index+1,posting_total)).await?;}
      let resolved=geocoding::resolve_posting(state,&posting).await?;let mut matches=Vec::new();let mut eligible_count=0usize;
      for profile in &enabled_profiles{let evaluation=matching::evaluate_location(&posting,profile,&resolved);if !evaluation.eligible{continue;}eligible_count+=1;let scored=matching::score_with_location(&posting,profile,&evaluation);if scored.match_score>=profile.min_score{matches.push(scored);}}
      if eligible_count==0{outside_location+=1;continue;}
@@ -54,9 +146,8 @@ pub async fn run_search(state:&AppState,user:Uuid,trigger:&str,only_source:Optio
    },Err(error)=>{let message=error.to_string();errors.push(format!("{}: {message}",source.company));sqlx::query("UPDATE sources SET last_error=$3 WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).bind(message).execute(&state.db).await?;}
   }
  }
- sqlx::query("UPDATE search_runs SET finished_at=$3,jobs_imported=$4,errors=$5 WHERE user_id=$1 AND id=$2").bind(user).bind(&run_id).bind(Utc::now().to_rfc3339()).bind(imported as i32).bind(json!(&errors)).execute(&state.db).await?;
+ report_progress(state,user,run_id,"Updating match scores").await?;
  rescore_saved_jobs(state,user).await?;
- if trigger=="scheduled"{notifications::create(state,user,"Job Tracker search complete",&format!("{imported} active jobs imported; {inactive} jobs marked inactive."),"/").await?;}
  Ok(ImportResult{imported,inactive,fetched,available,outside_location,below_minimum_score,source_errors:errors,truncated_sources})
 }
 
@@ -64,7 +155,7 @@ pub async fn worker_tick(state:&AppState)->Result<(),ApiError>{
  directory::verify_due(state).await?;
  sqlx::query("DELETE FROM connector_detail_cache WHERE last_used_at<now()-interval '90 days'").execute(&state.db).await?;
  let users:Vec<Uuid>=sqlx::query_scalar("SELECT DISTINCT user_id FROM profiles WHERE schedule<>'Manual' AND (next_run_at IS NULL OR next_run_at<=now())").fetch_all(&state.db).await?;
- for user in users { if let Err(error)=run_search(state,user,"scheduled",None).await{tracing::error!(%user,%error,"scheduled search failed");notifications::create(state,user,"Job Tracker scheduled search failed",&error.to_string(),"/").await?;} sqlx::query("UPDATE profiles SET next_run_at=CASE schedule WHEN 'Daily' THEN now()+interval '1 day' WHEN 'Weekdays' THEN now()+CASE extract(isodow from now()) WHEN 5 THEN interval '3 days' WHEN 6 THEN interval '2 days' ELSE interval '1 day' END WHEN 'Weekly' THEN now()+interval '7 days' ELSE NULL END WHERE user_id=$1 AND schedule<>'Manual' AND (next_run_at IS NULL OR next_run_at<=now())").bind(user).execute(&state.db).await?; }
+ for user in users { match run_search(state,user,"scheduled",None).await{Ok(_)=>{},Err(ApiError::Conflict(_))=>tracing::info!(%user,"scheduled search skipped because a search is already running"),Err(error)=>{tracing::error!(%user,%error,"scheduled search failed");notifications::create(state,user,"Job Tracker scheduled search failed",&error.to_string(),"/").await?;}} sqlx::query("UPDATE profiles SET next_run_at=CASE schedule WHEN 'Daily' THEN now()+interval '1 day' WHEN 'Weekdays' THEN now()+CASE extract(isodow from now()) WHEN 5 THEN interval '3 days' WHEN 6 THEN interval '2 days' ELSE interval '1 day' END WHEN 'Weekly' THEN now()+interval '7 days' ELSE NULL END WHERE user_id=$1 AND schedule<>'Manual' AND (next_run_at IS NULL OR next_run_at<=now())").bind(user).execute(&state.db).await?; }
  let due=sqlx::query_as::<_,(Uuid,i64)>("SELECT user_id,count(*) FROM trackers WHERE follow_up_at IS NOT NULL AND follow_up_at<>'' AND follow_up_at::timestamptz<=now() GROUP BY user_id").fetch_all(&state.db).await?;
  for(user,count)in due{let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notifications WHERE user_id=$1 AND title='Job Tracker follow-ups due' AND created_at>current_date)").bind(user).fetch_one(&state.db).await?;if !exists{notifications::create(state,user,"Job Tracker follow-ups due",&format!("{count} application follow-up(s) are due."),"/").await?;}}
  Ok(())

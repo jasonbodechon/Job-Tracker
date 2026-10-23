@@ -12,12 +12,14 @@ pub enum ApiError {
     #[error("not found")]
     NotFound,
     #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Internal(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self { Self::Unauthorized => StatusCode::UNAUTHORIZED, Self::Forbidden => StatusCode::FORBIDDEN, Self::BadRequest(_) => StatusCode::BAD_REQUEST, Self::NotFound => StatusCode::NOT_FOUND, Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR };
+        let status = match self { Self::Unauthorized => StatusCode::UNAUTHORIZED, Self::Forbidden => StatusCode::FORBIDDEN, Self::BadRequest(_) => StatusCode::BAD_REQUEST, Self::NotFound => StatusCode::NOT_FOUND, Self::Conflict(_) => StatusCode::CONFLICT, Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
 }
