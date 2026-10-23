@@ -49,6 +49,8 @@ export interface CompanyDirectoryEntry {
   detectedProvider?: JobSourceKind;
   redirectUrl?: string;
 }
+/** What one source contributed to a search. */
+export interface SourceSummary { sourceId: string; company: string; kind: string; available: number; fetched: number; imported: number; outsideLocation: number; belowMinimumScore: number; warning?: string | null; error?: string | null; }
 export interface ImportResult {
   imported: number;
   inactive: number;
@@ -58,6 +60,7 @@ export interface ImportResult {
   belowMinimumScore?: number;
   sourceErrors?: string[];
   truncatedSources?: string[];
+  sources?: SourceSummary[];
 }
 export type SearchRunStatus = "Running" | "Completed" | "Failed" | "Abandoned";
 export interface SearchRun { id: string; startedAt: string; finishedAt?: string; triggerType: string; sourcesChecked: number; jobsImported: number; errors: string[]; status: SearchRunStatus; progress: string; result?: ImportResult | null; }

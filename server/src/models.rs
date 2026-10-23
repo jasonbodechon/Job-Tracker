@@ -68,6 +68,10 @@ pub struct Tracker { pub job_id: String, pub status: String, pub notes: String, 
 #[derive(Debug, Serialize, FromRow)] #[serde(rename_all = "camelCase")]
 pub struct SearchRun { pub id: String, pub started_at: String, pub finished_at: Option<String>, pub trigger_type: String, pub sources_checked: i32, pub jobs_imported: i32, pub errors: Value, pub status: String, pub progress: String, pub result: Option<Value> }
 
+/// What one source contributed to a search, so the page can show why a source added no jobs.
+#[derive(Debug, Serialize)] #[serde(rename_all = "camelCase")]
+pub struct SourceSummary { pub source_id: String, pub company: String, pub kind: String, pub available: usize, pub fetched: usize, pub imported: usize, pub outside_location: usize, pub below_minimum_score: usize, pub warning: Option<String>, pub error: Option<String> }
+
 #[derive(Debug, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct ImportResult {
  pub imported: usize,
@@ -78,6 +82,7 @@ pub struct ImportResult {
  pub below_minimum_score: usize,
  pub source_errors: Vec<String>,
  pub truncated_sources: Vec<String>,
+ pub sources: Vec<SourceSummary>,
 }
 
 #[derive(Debug, Serialize)] #[serde(rename_all = "camelCase")]

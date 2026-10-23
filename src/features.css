@@ -123,3 +123,15 @@
 
 /* Progress of a background search, shown under the page header while it runs. */
 .search-progress { display: flex; align-items: center; gap: 8px; margin: -16px 0 20px; padding: 9px 12px; border: 1px solid #e3dffa; border-radius: 8px; background: #f3f1fd; color: #5f5e6c; font-size: 12px; }
+
+/* Filter menus must open over the results grid; the card used to clip them. */
+.results-card { overflow: visible; }
+.results-card .table-wrap { overflow-x: auto; border-radius: 0 0 11px 11px; }
+.results-card .multi-select > div { z-index: 20; max-height: 320px; overflow-y: auto; }
+
+/* What each source returned in the latest search. */
+.source-summaries { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; color: #6a6875; font-size: 12px; }
+.source-summaries li::before { content: "✓ "; color: #42a56e; font-weight: 700; }
+.source-summaries li.empty::before { content: "○ "; color: #a57526; }
+.source-summaries li.failed { color: #b54a3a; }
+.source-summaries li.failed::before { content: "! "; color: #b54a3a; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeSearchResult, noResultsGuidance } from "./searchSummary";
+import { describeSearchResult, describeSourceSummary, noResultsGuidance } from "./searchSummary";
 
 describe("search result summary", () => {
   it("reports fetched and excluded posting counts", () => {
@@ -22,5 +22,14 @@ describe("search result summary", () => {
 
   it("surfaces source failures before profile advice", () => {
     expect(noResultsGuidance({ imported: 0, inactive: 0, sourceErrors: ["Top Hat: request failed"] })).toContain("Top Hat: request failed");
+  });
+
+  it("explains what each source returned", () => {
+    const base = { sourceId: "directory-amazon", company: "Amazon", kind: "Amazon", available: 1000, fetched: 1000, imported: 0, outsideLocation: 985, belowMinimumScore: 15 };
+    expect(describeSourceSummary(base)).toBe("Amazon: 1,000 jobs checked, 0 imported (985 outside your location settings, 15 below your minimum score).");
+    expect(describeSourceSummary({ ...base, available: 8412, imported: 3, outsideLocation: 990, belowMinimumScore: 7 })).toBe("Amazon: 1,000 of 8,412 jobs checked (source limit reached), 3 imported (990 outside your location settings, 7 below your minimum score).");
+    expect(describeSourceSummary({ ...base, fetched: 0, available: 0, outsideLocation: 0, belowMinimumScore: 0 })).toBe("Amazon: the source returned no jobs.");
+    expect(describeSourceSummary({ ...base, error: "request timed out" })).toBe("Amazon: failed. request timed out");
+    expect(describeSourceSummary({ ...base, imported: 2, outsideLocation: 998, belowMinimumScore: 0, warning: "[PARTIAL_REFRESH] Kept 1000 jobs" })).toBe("Amazon: 1,000 jobs checked, 2 imported (998 outside your location settings). Warning: [PARTIAL_REFRESH] Kept 1000 jobs");
   });
 });

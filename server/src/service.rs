@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use crate::{connectors, directory, error::ApiError, geocoding, matching, models::{ImportResult, Job, Posting, Profile, ProfileRow, ResolvedLocation, Source, StoredPosting}, notifications, AppState};
+use crate::{connectors, directory, error::ApiError, geocoding, matching, models::{ImportResult, Job, SourceSummary, Posting, Profile, ProfileRow, ResolvedLocation, Source, StoredPosting}, notifications, AppState};
 
 pub async fn profiles(state:&AppState,user:Uuid)->Result<Vec<Profile>,ApiError>{
  let rows=sqlx::query_as::<_,ProfileRow>("SELECT id,name,titles,required_skills,preferred_skills,remote_only,countries,regions,cities,min_score,enabled,schedule,resume_text,weights,distance_enabled,active_location,active_latitude,active_longitude,maximum_distance_km,include_remote,include_hybrid,include_onsite,broad_location_policy FROM profiles WHERE user_id=$1 ORDER BY updated_at DESC").bind(user).fetch_all(&state.db).await?;
@@ -118,14 +118,17 @@ async fn execute_and_record(state:&AppState,user:Uuid,run_id:&str,trigger:&str,p
 
 async fn execute_search(state:&AppState,user:Uuid,run_id:&str,plan:SearchPlan)->Result<ImportResult,ApiError>{
  let SearchPlan{profiles:enabled_profiles,sources:source_rows}=plan;
- let mut imported=0usize;let mut inactive=0usize;let mut fetched=0usize;let mut available=0usize;let mut outside_location=0usize;let mut below_minimum_score=0usize;let mut errors=Vec::new();let mut truncated_sources=Vec::new();
+ let mut imported=0usize;let mut inactive=0usize;let mut fetched=0usize;let mut available=0usize;let mut outside_location=0usize;let mut below_minimum_score=0usize;let mut errors=Vec::new();let mut truncated_sources=Vec::new();let mut summaries=Vec::new();
  let source_total=source_rows.len();
  for (source_index,source) in source_rows.into_iter().enumerate() {
   let source_label=format!("{} (source {} of {})",source.company,source_index+1,source_total);
   report_progress(state,user,run_id,&format!("{source_label}: fetching jobs")).await?;
+  let (imported_before,fetched_before,available_before,outside_before,below_before)=(imported,fetched,available,outside_location,below_minimum_score);
+  let mut source_warning:Option<String>=None;let mut source_error:Option<String>=None;
   let encrypted:Option<String>=sqlx::query_scalar("SELECT credentials_ciphertext FROM sources WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).fetch_one(&state.db).await?;
   match connectors::fetch_with_metadata(state,&source,encrypted.as_deref()).await {
    Ok(result)=>{
+    source_warning=result.warning.clone();
     let postings=result.postings;let reported=result.reported_count.map(|count|count.max(0)as usize).unwrap_or(postings.len());available+=reported;if reported>postings.len(){truncated_sources.push(format!("{} ({} of {})",source.company,postings.len(),reported));}
     fetched+=postings.len();
     let seen=postings.iter().map(|p|format!("{}:{}",source.kind,p.external_id)).collect::<Vec<_>>();
@@ -143,12 +146,13 @@ async fn execute_search(state:&AppState,user:Uuid,run_id:&str,plan:SearchPlan)->
     }
     if result.warning.is_none(){let update=if seen.is_empty(){sqlx::query("UPDATE jobs SET active=false WHERE user_id=$1 AND source_id=$2 AND active=true").bind(user).bind(&source.id).execute(&state.db).await?}else{sqlx::query("UPDATE jobs SET active=false WHERE user_id=$1 AND source_id=$2 AND active=true AND NOT(id=ANY($3))").bind(user).bind(&source.id).bind(&seen).execute(&state.db).await?};inactive+=update.rows_affected() as usize;}
     if let Some(warning)=result.warning{errors.push(format!("{}: {warning}",source.company));sqlx::query("UPDATE sources SET last_refreshed_at=now(),last_error=$3 WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).bind(warning).execute(&state.db).await?;}else{sqlx::query("UPDATE sources SET last_refreshed_at=now(),last_error=NULL WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).execute(&state.db).await?;}
-   },Err(error)=>{let message=error.to_string();errors.push(format!("{}: {message}",source.company));sqlx::query("UPDATE sources SET last_error=$3 WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).bind(message).execute(&state.db).await?;}
+   },Err(error)=>{let message=error.to_string();source_error=Some(message.clone());errors.push(format!("{}: {message}",source.company));sqlx::query("UPDATE sources SET last_error=$3 WHERE user_id=$1 AND id=$2").bind(user).bind(&source.id).bind(message).execute(&state.db).await?;}
   }
+  summaries.push(SourceSummary{source_id:source.id.clone(),company:source.company.clone(),kind:source.kind.clone(),available:available-available_before,fetched:fetched-fetched_before,imported:imported-imported_before,outside_location:outside_location-outside_before,below_minimum_score:below_minimum_score-below_before,warning:source_warning,error:source_error});
  }
  report_progress(state,user,run_id,"Updating match scores").await?;
  rescore_saved_jobs(state,user).await?;
- Ok(ImportResult{imported,inactive,fetched,available,outside_location,below_minimum_score,source_errors:errors,truncated_sources})
+ Ok(ImportResult{imported,inactive,fetched,available,outside_location,below_minimum_score,source_errors:errors,truncated_sources,sources:summaries})
 }
 
 pub async fn worker_tick(state:&AppState)->Result<(),ApiError>{

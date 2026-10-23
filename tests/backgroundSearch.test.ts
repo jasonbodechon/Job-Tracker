@@ -48,4 +48,17 @@ describe("background job searches", () => {
     expect(app).toContain("const running = runningSearch(runs)");
     expect(app).toContain('className="search-progress" role="status"');
   });
+
+  it("records and shows what each source returned", () => {
+    expect(read("server/src/models.rs")).toContain("pub struct SourceSummary");
+    expect(service).toContain("summaries.push(SourceSummary{");
+    expect(service).toContain("sources:summaries})");
+    expect(app).toContain('<ul className="source-summaries">');
+  });
+
+  it("lets filter menus open over the results grid", () => {
+    const css = read("src/features.css");
+    expect(css).toContain(".results-card { overflow: visible; }");
+    expect(css).toContain(".results-card .multi-select > div { z-index: 20;");
+  });
 });
