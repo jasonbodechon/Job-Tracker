@@ -1,0 +1,30 @@
+# Optional, local only: serve Job Tracker through a reverse proxy that runs in
+# its own Docker project, instead of the bundled local Caddy on port 8080.
+# Production (docker-compose.yml + deployment/Caddyfile) is not affected.
+#
+# Turn it on by adding to .env.local:
+#   JOB_TRACKER_PROXY_ORIGIN=http://jobs.example.lan   (the address people open)
+#   PROXY_NETWORK=proxy                                 (optional, default "proxy")
+# "Start Job Tracker Local.cmd" then adds this file, stops the bundled Caddy and
+# waits for the API instead of port 8080. Point the proxy at job-tracker-api:8080.
+#
+# Use on top of docker-compose.yml and docker-compose.local.yml:
+#   docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.proxy.yml up -d
+services:
+  api:
+    environment:
+      APP_ORIGIN: ${JOB_TRACKER_PROXY_ORIGIN:?Set JOB_TRACKER_PROXY_ORIGIN in .env.local}
+      # false for a plain-HTTP proxy; true when the proxy serves HTTPS.
+      COOKIE_SECURE: ${JOB_TRACKER_PROXY_COOKIE_SECURE:-false}
+    networks:
+      default:
+      proxy:
+        aliases: [job-tracker-api]
+  caddy:
+    # The bundled Caddy only starts when this profile is requested.
+    profiles: [bundled-caddy]
+
+networks:
+  proxy:
+    name: ${PROXY_NETWORK:-proxy}
+    external: true

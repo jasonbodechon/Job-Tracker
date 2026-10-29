@@ -10,12 +10,17 @@ set "JT_QUICK="
 if /i "%~1"=="quick" set "JT_QUICK=1"
 set "JT_COMPOSE=docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.local.yml"
 set "JT_MIN_NODE_MAJOR=20"
+set "JT_APP_URL=http://localhost:8080"
+set "JT_PULL_SERVICES=postgres caddy"
+set "JT_PROXY_ORIGIN="
 
 call :ensure_docker
 if errorlevel 1 goto :fail
 call :ensure_node
 if errorlevel 1 goto :fail
 call :ensure_local_environment
+if errorlevel 1 goto :fail
+call :resolve_proxy_mode
 if errorlevel 1 goto :fail
 call :resolve_install_mode
 if errorlevel 1 goto :fail
@@ -34,8 +39,8 @@ call :step "Running TypeScript and frontend unit tests"
 call npm run test:frontend
 if errorlevel 1 (set "FAIL_MESSAGE=TypeScript and frontend unit tests failed." & goto :fail)
 
-call :step "Downloading updated PostgreSQL and Caddy images"
-%JT_COMPOSE% pull postgres caddy
+call :step "Downloading updated images (%JT_PULL_SERVICES%)"
+%JT_COMPOSE% pull %JT_PULL_SERVICES%
 if errorlevel 1 (set "FAIL_MESSAGE=Updated PostgreSQL or Caddy images could not be downloaded." & goto :fail)
 
 rem The Docker build compiles the production frontend and runs the Rust server tests.
@@ -47,8 +52,13 @@ call :backup_database
 if errorlevel 1 goto :fail
 
 :start_services
-call :release_local_port
-if errorlevel 1 goto :fail
+if defined JT_PROXY_ORIGIN (
+  rem The shared proxy serves Job Tracker, so the bundled Caddy is not needed.
+  %JT_COMPOSE% rm --stop --force caddy >nul 2>&1
+) else (
+  call :release_local_port
+  if errorlevel 1 goto :fail
+)
 
 call :step "Installing or upgrading the running local Job Tracker containers"
 %JT_COMPOSE% up -d --remove-orphans
@@ -57,12 +67,17 @@ if errorlevel 1 (set "FAIL_MESSAGE=The local Docker services could not be instal
 call :sync_local_database_password
 if errorlevel 1 goto :fail
 
-call :wait_for_url "http://localhost:8080/api/health"
-if errorlevel 1 (set "FAIL_MESSAGE=Job Tracker did not become healthy at http://localhost:8080." & goto :fail)
+if defined JT_PROXY_ORIGIN (
+  call :wait_for_api
+) else (
+  call :wait_for_url "!JT_APP_URL!/api/health"
+)
+if errorlevel 1 (set "FAIL_MESSAGE=Job Tracker did not become healthy at !JT_APP_URL!." & goto :fail)
 
-start "" "http://localhost:8080"
+start "" "!JT_APP_URL!"
 echo.
-echo Job Tracker is running locally at http://localhost:8080
+echo Job Tracker is running locally at !JT_APP_URL!
+if defined JT_PROXY_ORIGIN echo It is served by the shared reverse proxy, which must be running.
 if defined JT_QUICK (echo Completed mode: QUICK START) else echo Completed mode: !DEPLOYMENT_MODE!
 if defined JT_BACKUP_FILE echo Database backup saved to !JT_BACKUP_FILE!
 echo To stop it later, run: %JT_COMPOSE% down
@@ -227,6 +242,36 @@ for /f "delims=" %%C in ('%JT_COMPOSE% ps -a -q worker 2^>nul') do set "DEPLOYME
 docker volume inspect "!COMPOSE_PROJECT_NAME!_job_tracker_postgres" >nul 2>&1 && set "DEPLOYMENT_MODE=UPDATE" && set "JT_HAS_DATABASE=1"
 docker volume inspect "!COMPOSE_PROJECT_NAME!_caddy_data" >nul 2>&1 && set "DEPLOYMENT_MODE=UPDATE"
 exit /b 0
+
+:resolve_proxy_mode
+rem Optional: JOB_TRACKER_PROXY_ORIGIN in .env.local switches from the bundled
+rem Caddy on port 8080 to a reverse proxy in its own Docker project.
+set "JT_PROXY_NETWORK=proxy"
+for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env.local") do (
+  if /i "%%A"=="JOB_TRACKER_PROXY_ORIGIN" set "JT_PROXY_ORIGIN=%%B"
+  if /i "%%A"=="PROXY_NETWORK" if not "%%B"=="" set "JT_PROXY_NETWORK=%%B"
+)
+if not defined JT_PROXY_ORIGIN exit /b 0
+docker network inspect "!JT_PROXY_NETWORK!" >nul 2>&1
+if errorlevel 1 (
+  set "FAIL_MESSAGE=JOB_TRACKER_PROXY_ORIGIN is set in .env.local, but the Docker network !JT_PROXY_NETWORK! does not exist. Start the reverse proxy first, or remove JOB_TRACKER_PROXY_ORIGIN to use the bundled Caddy on port 8080."
+  exit /b 1
+)
+set "JT_COMPOSE=%JT_COMPOSE% -f docker-compose.proxy.yml"
+set "JT_APP_URL=!JT_PROXY_ORIGIN!"
+set "JT_PULL_SERVICES=postgres"
+echo Job Tracker proxy mode: served at !JT_PROXY_ORIGIN! by the shared reverse proxy.
+exit /b 0
+
+:wait_for_api
+rem Checked inside the container, so it does not depend on the proxy or name lookup.
+set /a URL_ATTEMPTS=0
+:wait_for_api_loop
+%JT_COMPOSE% exec -T api curl --fail --silent http://localhost:8080/api/health >nul 2>&1 && exit /b 0
+timeout /t 3 /nobreak >nul
+set /a URL_ATTEMPTS+=1
+if !URL_ATTEMPTS! lss 30 goto :wait_for_api_loop
+exit /b 1
 
 :release_local_port
 set "JT_PORT_BLOCKER="

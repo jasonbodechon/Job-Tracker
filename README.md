@@ -46,6 +46,19 @@ Run `"Start Job Tracker Local.cmd" quick` to start an existing installation with
 
 `Start Job Tracker Local.cmd` keeps the password in the persistent local PostgreSQL volume synchronized with `.env.local` before the health check. This prevents a regenerated `.env.local` from blocking the API while preserving existing local profiles, sources, and job data. It applies only to the localhost configuration; production credentials are never changed automatically.
 
+### Optional: behind a separate reverse proxy
+
+If you already run a reverse proxy in its own Docker project (for example one Caddy in front of several apps), Job Tracker can use it instead of its bundled local Caddy on port 8080. Add to `.env.local`:
+
+```
+JOB_TRACKER_PROXY_ORIGIN=http://jobs.example.lan
+PROXY_NETWORK=proxy
+```
+
+`JOB_TRACKER_PROXY_ORIGIN` is the address people open; `PROXY_NETWORK` (default `proxy`) is the existing Docker network the proxy is on. `Start Job Tracker Local.cmd` then adds `docker-compose.proxy.yml`, removes the bundled Caddy container, waits for the API inside its container and opens that address. Point the proxy at `job-tracker-api:8080`, for example `reverse_proxy job-tracker-api:8080` in a Caddyfile. Remove `JOB_TRACKER_PROXY_ORIGIN` to go back to `http://localhost:8080`.
+
+Cookies stay non-secure by default (`JOB_TRACKER_PROXY_COOKIE_SECURE=false`), which suits a plain-HTTP proxy on a trusted home network but sends the session cookie unencrypted there. Set it to `true` when the proxy serves HTTPS. The installable app and push notifications need HTTPS (or localhost), so they are unavailable to other devices over plain HTTP. Production deployment is unaffected.
+
 Create a PostgreSQL backup with `sh deployment/backup.sh`. Test restoration regularly in a non-production database.
 
 ## Desktop data migration
